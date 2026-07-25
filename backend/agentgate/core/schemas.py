@@ -8,6 +8,7 @@ rounding lies and would break the trustworthy deterministic core.
 from __future__ import annotations
 
 import json
+import re
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Optional
@@ -37,6 +38,46 @@ MAX_NUMERIC_CHARS = 50
 MAX_LINE_ITEMS = 500
 MAX_TAX_LINES = 50
 MAX_RAW_TEXT_LENGTH = 50_000
+
+QUOTATION_RAW_TEXT_MESSAGE = (
+    "AgentGate verifies payments against invoices only. Quotations, quotes, and "
+    "estimates are pre-payment documents — issue or receive an invoice before paying."
+)
+
+CALLER_RAW_TEXT_REQUIRED_MESSAGE = (
+    "Caller-supplied evidence requires source.raw_text — the original invoice "
+    "document text. AgentGate does not verify agent-forged JSON alone. Use "
+    "source.fetch to resolve from your system of record."
+)
+
+_QUOTATION_RAW_TEXT_PATTERNS = (
+    re.compile(r"\bQUOTATION\b", re.IGNORECASE),
+    re.compile(r"\bQuote\s*#:", re.IGNORECASE),
+    re.compile(r"\bQuote\s+Date:", re.IGNORECASE),
+    re.compile(r"\bQuote\s+number\b", re.IGNORECASE),
+    re.compile(r"\bEstimate\s*#:", re.IGNORECASE),
+    re.compile(r"\bEstimate\s+Date:", re.IGNORECASE),
+)
+
+# An invoice marker anywhere in the text means the document is invoice-shaped:
+# a real invoice routinely REFERENCES its originating quotation ("as per
+# quotation Q-123"), so quote wording alone must not reject it (PRD SS5b
+# invoice-marker precedence). Shared with the upstream parser — one definition,
+# no drift.
+INVOICE_MARKER_RE = re.compile(
+    r"(?:\btax\s+invoice\b)|(?:\binvoice\s*(?:#|no\.?|num(?:ber)?|id)\b)|(?:^[ \t]*invoice\b)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _reject_quotation_raw_text(raw_text: str) -> None:
+    """Payment verification belongs at invoice time, not quote time. Quote
+    wording only rejects when no invoice marker is present (see above)."""
+    if INVOICE_MARKER_RE.search(raw_text):
+        return
+    for pattern in _QUOTATION_RAW_TEXT_PATTERNS:
+        if pattern.search(raw_text):
+            raise ValueError(QUOTATION_RAW_TEXT_MESSAGE)
 
 # Every caller-facing wire model is extra="forbid" (PRD SS6/SS9, D36): an
 # unknown or misspelled field is a ValidationError -> fail-closed ESCALATE,
@@ -243,16 +284,21 @@ class LineItem(BaseModel):
 class TaxLine(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    rate: Decimal
+    rate: Optional[Decimal] = None
     amount: Money
 
     @field_validator("rate", mode="before")
     @classmethod
     def _rate_no_float(cls, v: object) -> object:
-        """Tax rate is ``Decimal``, never float (D1). ``_coerce_decimal`` also caps
-        length/precision and rejects NaN/Infinity on every entry path — without
-        that a junk rate escaped ``model_validate`` as a raw ``InvalidOperation``,
-        bypassing an ``except ValidationError`` fail-closed catch (D34)."""
+        """Tax rate is ``Decimal``, never float (D1), and OPTIONAL — many real
+        documents state a tax amount with no rate, and fabricating one would be
+        a lie; no check consumes ``rate``, only tax amounts feed arithmetic and
+        coverage (PRD §6). ``_coerce_decimal`` also caps length/precision and
+        rejects NaN/Infinity on every entry path — without that a junk rate
+        escaped ``model_validate`` as a raw ``InvalidOperation``, bypassing an
+        ``except ValidationError`` fail-closed catch (D34)."""
+        if v is None:
+            return None
         return _coerce_decimal(v, "tax rate")
 
 
@@ -428,13 +474,13 @@ class Decision(BaseModel):
 class Source(BaseModel):
     """The evidence for a verification (PRD SS0/SS9) — a two-mode union (D45).
 
-    Caller mode: ``invoice`` (required) plus optional ``raw_text`` grounding
-    evidence, treated literally when present: an empty string is evidence that
-    grounds nothing (the D27 total gate escalates), never coerced to "absent"
-    (D36). Fetch mode: ``fetch`` names an invoice number to resolve from the
-    operator-configured system of record — and nothing else may be supplied,
-    or the ``system_of_record:`` provenance stamped on the Decision would label
-    evidence the caller shaped. Exactly one mode; the validator enforces it.
+    Caller mode: ``invoice`` plus **required** ``raw_text`` (the original invoice
+    document). Structured JSON alone is rejected — enterprise deployments must
+    attach source text for grounding or use fetch mode. Fetch mode: ``fetch``
+    names an invoice number to resolve from the operator-configured system of
+    record — and nothing else may be supplied, or the ``system_of_record:``
+    provenance stamped on the Decision would label evidence the caller shaped.
+    Exactly one mode; the validator enforces it.
 
     There is deliberately no ``po`` field: the ``po_match`` check does not exist
     yet, and accepting evidence nothing reads would make ALLOW overclaim —
@@ -453,6 +499,13 @@ class Source(BaseModel):
             return None
         return _normalized_identifier(v, "source.fetch")
 
+    @field_validator("raw_text")
+    @classmethod
+    def _invoice_only_raw_text(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            _reject_quotation_raw_text(v)
+        return v
+
     @model_validator(mode="after")
     def _exactly_one_mode(self) -> "Source":
         if self.fetch is not None:
@@ -468,6 +521,8 @@ class Source(BaseModel):
                 "evidence) or fetch (an invoice number to resolve from the "
                 "system of record)."
             )
+        elif self.raw_text is None or not self.raw_text.strip():
+            raise ValueError(CALLER_RAW_TEXT_REQUIRED_MESSAGE)
         return self
 
 

@@ -214,3 +214,16 @@ def test_score_drops_when_soft_check_fails():
     # vendor (soft) fails -> 1 of 2 soft checks pass -> score 0.50.
     decision = decide(make_invoice(vendor="Acme Corp"), make_action(amount="1240.00", vendor="Other Inc"))
     assert decision.score == Decimal("0.50")
+
+
+def test_tax_line_rate_is_optional():
+    # Many real documents state a tax amount with no rate; fabricating one would
+    # be a lie. No check consumes rate - only tax amounts feed arithmetic.
+    items = [
+        LineItem(description="Item", quantity=1, unit_price=m("100.00"), amount=m("100.00"), kind=LineItemKind.charge),
+    ]
+    taxes = [TaxLine(amount=m("8.00"))]
+    inv = make_invoice(total="108.00", line_items=items, tax_lines=taxes)
+    decision = decide(inv, make_action(amount="108.00"))
+    assert decision.decision is DecisionType.allow
+    assert taxes[0].rate is None

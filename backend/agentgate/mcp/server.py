@@ -58,9 +58,9 @@ def verify_action(proposed_action: dict, source: dict) -> dict:
     with machine-readable ``reasons`` (on a block, ``field_to_change`` and
     ``expected`` say exactly what to fix), a checks table, and a grounding
     score. ``source`` either contains a structured ``invoice`` and optional
-    ``raw_text`` (the original invoice text) for grounding, or — when the
-    server is configured with a system of record — ``{"fetch": "INV-001"}``
-    to have AgentGate resolve the invoice itself; fetched decisions mark every
+    ``raw_text`` (the original invoice text) for grounding — **required** in caller
+    mode; structured JSON alone is rejected. Or — when the server is configured
+    with a system of record — ``{"fetch": "INV-001"}`` to have AgentGate resolve the invoice itself; fetched decisions mark every
     ``evidence_used`` entry with a ``system_of_record:`` prefix. All money
     values MUST be JSON strings (``"1240.00"``), never numbers — a JSON number
     has already been parsed into a lossy float by the transport and will be

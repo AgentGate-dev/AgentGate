@@ -18,11 +18,14 @@ from typing import AsyncIterator, Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from agentgate.api.agent import router as agent_router
+from agentgate.api.orchestrator import router as orchestrator_router
 from agentgate.api.verify import router
 from agentgate.core.duplicate_store import DuplicateStore
 from agentgate.core.policy import DEFAULT_POLICY, Policy
 from agentgate.core.system_of_record import SourceOfRecord, build_source_of_record
 from agentgate.core.tracing import Tracer, build_tracer
+from agentgate.orchestrator.store import OrchestratorStore
 
 logger = logging.getLogger("agentgate.main")
 
@@ -59,6 +62,7 @@ def create_app(
     policy: Optional[Policy] = None,
     cors_origins: Optional[list[str]] = None,
     source_of_record: Optional[SourceOfRecord] = None,
+    orchestrator_store: Optional[OrchestratorStore] = None,
 ) -> FastAPI:
     """Build the service. Anything not injected is wired from the environment.
     An injected store is closed by its owner (the test/caller), not by the app.
@@ -68,6 +72,7 @@ def create_app(
     no credentials. Unset/empty means the middleware is not installed at all —
     same-origin only, the fail-closed default; never ``*``."""
     owns_store = store is None
+    owns_orchestrator_store = orchestrator_store is None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -76,6 +81,8 @@ def create_app(
             app.state.tracer.shutdown()  # flush batched traces; never fatal (D37)
         except Exception:
             logger.warning("tracer shutdown failed; ignored", exc_info=True)
+        if owns_orchestrator_store:
+            app.state.orchestrator_store.close()
         if owns_store:
             app.state.store.close()
 
@@ -92,6 +99,11 @@ def create_app(
     app.state.source_of_record = (
         source_of_record if source_of_record is not None else build_source_of_record()
     )
+    app.state.orchestrator_store = (
+        orchestrator_store
+        if orchestrator_store is not None
+        else OrchestratorStore(os.environ.get("AGENTGATE_ORCHESTRATOR_DB_PATH", ":memory:"))
+    )
 
     origins = _cors_origins_from_env() if cors_origins is None else _sanitized_origins(cors_origins)
     if origins:
@@ -104,6 +116,8 @@ def create_app(
         )
 
     app.include_router(router)
+    app.include_router(agent_router)
+    app.include_router(orchestrator_router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

@@ -32,6 +32,7 @@ from agentgate.core.schemas import (
 )
 from agentgate.core.tracing import NoopTracer
 from agentgate.main import create_app
+from tests.conftest import DEFAULT_RAW_TEXT
 
 
 def invoice_payload(**overrides) -> dict:
@@ -71,6 +72,8 @@ def action_payload(**overrides) -> dict:
 
 def verify_body(*, invoice: dict | None = None, action: dict | None = None, **source_extra) -> dict:
     source: dict = {"invoice": invoice if invoice is not None else invoice_payload()}
+    if "fetch" not in source_extra and "raw_text" not in source_extra:
+        source["raw_text"] = DEFAULT_RAW_TEXT
     source.update(source_extra)
     return {
         "proposed_action": action if action is not None else action_payload(),
@@ -219,7 +222,7 @@ def test_clean_request_allows_over_http(client):
         "duplicate_check",
     ]
     assert all(c["passed"] for c in body["checks"])
-    assert body["evidence_used"] == ["invoice:INV-001"]
+    assert body["evidence_used"] == ["invoice:INV-001", "raw_text"]
     assert body["proposed_action"]["vendor"] == "Acme Corp"
     assert_boundary_fields(body)
 
@@ -340,6 +343,37 @@ def test_raw_text_over_bound_fails_closed(client):
     assert "raw_text" in reason["message"]
 
 
+def test_quotation_raw_text_fails_closed(client):
+    resp = client.post(
+        "/verify",
+        json=verify_body(
+            raw_text=(
+                "QUOTATION\nQuote #: QUO-1\nQuote Date: 2026-07-21\n"
+                "Total: $100.00"
+            ),
+        ),
+    )
+    body = resp.json()
+    assert body["decision"] == "escalate"
+    (reason,) = body["reasons"]
+    assert reason["check"] == "fail_closed"
+    assert "invoices only" in reason["message"].lower()
+
+
+def test_structured_invoice_without_raw_text_fails_closed(client):
+    body = {
+        "proposed_action": action_payload(),
+        "source": {"invoice": invoice_payload()},
+    }
+    resp = client.post("/verify", json=body)
+    payload = resp.json()
+    assert payload["decision"] == "escalate"
+    (reason,) = payload["reasons"]
+    assert reason["check"] == "fail_closed"
+    assert "raw_text" in reason["message"].lower()
+    assert "forged json" in reason["message"].lower() or "agent-forged" in reason["message"].lower()
+
+
 # --- raw_text -> grounding coverage over HTTP (D27 wiring) -----------------------
 
 
@@ -363,14 +397,13 @@ def test_ungrounded_total_escalates_over_http(client):
     assert any(r["check"] == "total_not_grounded" for r in body["reasons"])
 
 
-def test_empty_raw_text_is_literal_evidence_not_absent(client):
-    # "" is supplied evidence that grounds nothing -> the decisive total gate
-    # escalates. It is never coerced to "absent" (that flips toward allow, the
-    # fail-open direction, D36).
-    resp = client.post("/verify", json=verify_body(raw_text=""))
+def test_empty_raw_text_is_rejected_at_the_boundary(client):
+    resp = client.post("/verify", json=verify_body(raw_text="   "))
     body = resp.json()
     assert body["decision"] == "escalate"
-    assert any(r["check"] == "total_not_grounded" for r in body["reasons"])
+    (reason,) = body["reasons"]
+    assert reason["check"] == "fail_closed"
+    assert "raw_text" in reason["message"].lower()
 
 
 # --- /verify is read-only (D38) --------------------------------------------------
@@ -613,4 +646,19 @@ def test_caller_mode_evidence_stays_unprefixed(client):
     # evidence for caller-supplied input — the exact lie D45 forbids.
     body = client.post("/verify", json=verify_body()).json()
     assert body["decision"] == "allow"
-    assert body["evidence_used"] == ["invoice:INV-001"]
+    assert body["evidence_used"] == ["invoice:INV-001", "raw_text"]
+
+
+def test_invoice_referencing_a_quotation_still_verifies(client):
+    # Real invoices routinely cite their originating quotation; only quote-marked
+    # text with NO invoice marker is rejected (PRD SS5b invoice-marker precedence).
+    resp = client.post(
+        "/verify",
+        json=verify_body(
+            raw_text=(
+                "INVOICE\nInvoice #: INV-001\nAcme Corp\n"
+                "As per quotation Q-88.\nTotal Due: $1,240.00"
+            ),
+        ),
+    )
+    assert resp.json()["decision"] == "allow"

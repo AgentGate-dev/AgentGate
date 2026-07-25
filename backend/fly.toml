@@ -1,0 +1,25 @@
+# Fly.io deploy (from backend/): fly deploy
+# After deploy, set CORS for your frontend origin:
+#   fly secrets set AGENTGATE_CORS_ORIGINS="https://your-app.vercel.app,http://127.0.0.1:3000"
+app = "agentgate-api"
+primary_region = "bom"
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "15s"
+    method = "GET"
+    path = "/health"
+
+[env]
+  AGENTGATE_RECORDS_DIR = "data/system_of_record"

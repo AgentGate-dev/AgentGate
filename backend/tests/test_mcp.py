@@ -17,6 +17,8 @@ from datetime import datetime
 
 from agentgate.mcp.server import mcp, verify_action
 
+DEFAULT_RAW_TEXT = "Invoice INV-001 from Acme Corp. Total Due: $1,240.00"
+
 
 def invoice_payload(**overrides) -> dict:
     payload = {
@@ -53,6 +55,12 @@ def action_payload(**overrides) -> dict:
     return payload
 
 
+def source_payload(**overrides) -> dict:
+    source = {"invoice": invoice_payload(), "raw_text": DEFAULT_RAW_TEXT}
+    source.update(overrides)
+    return source
+
+
 def assert_boundary_fields(decision: dict) -> None:
     uuid.UUID(decision["trace_id"])
     assert isinstance(decision["latency_ms"], int)
@@ -61,7 +69,7 @@ def assert_boundary_fields(decision: dict) -> None:
 
 
 def test_clean_request_returns_allow_decision():
-    decision = verify_action(action_payload(), {"invoice": invoice_payload()})
+    decision = verify_action(action_payload(), source_payload())
     assert decision["decision"] == "allow"
     assert decision["score"] == "1.00"  # Decimal stays a JSON string (D35/D44)
     assert len(decision["checks"]) == 7
@@ -71,7 +79,7 @@ def test_clean_request_returns_allow_decision():
 
 def test_tampered_amount_blocks_with_machine_readable_reason():
     action = action_payload(amount={"value": "12400.00", "currency": "USD"})
-    decision = verify_action(action, {"invoice": invoice_payload()})
+    decision = verify_action(action, source_payload())
     assert decision["decision"] == "block"
     (reason,) = decision["reasons"]
     assert reason["check"] == "action_amount_matches_total"
@@ -93,16 +101,24 @@ def test_float_money_is_rejected_with_an_instructive_message():
     # rejecting it (rather than laundering it through str()) is the only
     # D1-honest behavior (D44).
     action = action_payload(amount={"value": 1240.0, "currency": "USD"})
-    decision = verify_action(action, {"invoice": invoice_payload()})
+    decision = verify_action(action, source_payload())
     assert decision["decision"] == "escalate"
     (reason,) = decision["reasons"]
     assert reason["check"] == "fail_closed"
     assert "never float" in reason["message"]
 
 
+def test_structured_invoice_without_raw_text_fails_closed():
+    decision = verify_action(action_payload(), {"invoice": invoice_payload()})
+    assert decision["decision"] == "escalate"
+    (reason,) = decision["reasons"]
+    assert reason["check"] == "fail_closed"
+    assert "raw_text" in reason["message"].lower()
+
+
 def test_po_evidence_is_rejected_like_http():
     decision = verify_action(
-        action_payload(), {"invoice": invoice_payload(), "po": {"po_number": "PO-1"}}
+        action_payload(), source_payload(po={"po_number": "PO-1"})
     )
     assert decision["decision"] == "escalate"
     (reason,) = decision["reasons"]
@@ -115,7 +131,7 @@ def test_unexpected_internal_error_fails_closed(monkeypatch):
         raise RuntimeError("kaboom")
 
     monkeypatch.setattr("agentgate.mcp.server.decide", boom)
-    decision = verify_action(action_payload(), {"invoice": invoice_payload()})
+    decision = verify_action(action_payload(), source_payload())
     assert decision["decision"] == "escalate"
     (reason,) = decision["reasons"]
     assert reason["check"] == "fail_closed"

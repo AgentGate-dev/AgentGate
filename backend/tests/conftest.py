@@ -9,6 +9,9 @@ from pathlib import Path
 
 SAMPLES = Path(__file__).resolve().parent.parent / "data" / "sample_invoices"
 
+# Grounded invoice text shared by HTTP/MCP contract tests (matches invoice_payload totals).
+DEFAULT_RAW_TEXT = "Invoice INV-001 from Acme Corp. Total Due: $1,240.00"
+
 
 def load_sample(name: str) -> str:
     return (SAMPLES / name).read_text()

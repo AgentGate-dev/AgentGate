@@ -1,6 +1,6 @@
 # AgentGate
 
-> **AgentGate is an agent-reliability gate, not a security/trust gate.** Its honest v1 claim: it catches an **honest-but-fallible agent's mistakes** — arithmetic slips, decimal errors, LLM misreads, duplicates — at the moment of the write, and returns a machine-readable reason the agent can fix against. In caller-supplied mode it does **NOT** defend against an adversarial agent that forges its own evidence, and it does **NOT** detect fraud or bad business judgment. Passing AgentGate means "the action is consistent with the evidence provided," never "the payment is correct or authorized." **Fetch mode** narrows that first gap: the gate can resolve the invoice itself from an operator-controlled system of record, so the agent chooses *which* invoice but never *what it says* — a trust anchor exactly as strong as the deployment that keeps the records out of the agent's hands.
+> **AgentGate is an agent-reliability gate, not a security/trust gate.** Its honest v1 claim: it catches an **honest-but-fallible agent's mistakes** — arithmetic slips, decimal errors, LLM misreads, duplicates — at the moment of the write, and returns a machine-readable reason the agent can fix against. Caller mode **requires the original invoice text** (`source.raw_text`) alongside structured fields — **agent-forged JSON alone is rejected**. It does **NOT** detect fraud or bad business judgment. Passing AgentGate means "the action is consistent with the evidence provided," never "the payment is correct or authorized." **Fetch mode** is the stronger trust anchor: the gate resolves the invoice from an operator-controlled system of record, so the agent chooses *which* invoice but never *what it says*.
 
 A pre-action reliability gate for AI agents. When an agent proposes an action that
 touches real systems ("approve invoice INV-001 for $12,500"), AgentGate checks it
@@ -39,8 +39,10 @@ The verification core is working end to end:
 - **Fail-closed input boundary** — input that cannot be parsed becomes a valid `escalate` decision with a `null` score via a pure factory (never a crash, never an allow), with error messages bounded so raw caller text never rides into traces or the dashboard. Every caller-supplied text field is length-capped at the schema; anything over a cap is rejected and escalates to a human. This is the contract the HTTP API sits on.
 - **HTTP API** — `POST /verify` serves the gate and always answers **HTTP 200 with a decision** (verified or fail-closed): an undecodable body, a schema-invalid field, an oversized request (1 MiB cap), or an unexpected internal error all become a valid `escalate` decision — never a 5xx, never a framework 422, never an allow. Unknown fields anywhere in the request are rejected rather than silently dropped (a misspelled `adjustments` key must not turn a declared withholding into an auto-"fixed" full payment), money may be sent as JSON strings or numbers (decoded to exact decimals, floats never exist), and every decimal comes back as a JSON string so nothing re-floats it downstream. `/verify` is read-only — it reads the duplicate store, records nothing, so a dry run never burns an invoice number. Note the honest consequence: recording an approval is a deliberate post-payment **library** call (`DuplicateStore.mark_approved`), so the duplicate check is live for library callers who record after paying — and **inert over the deployed HTTP surface** (nothing over HTTP ever writes the store, so `/verify` alone can never see a duplicate) until a recording path with authentication exists; v1 has no auth, and an unauthenticated recording endpoint would let anyone poison the store and force-escalate every legitimate payment. Optional Langfuse tracing observes decisions without being able to affect them (no keys → no-op; of raw invoice text it records length only, never content).
 
-- **Web dashboard + live demo** — a Next.js site (`frontend/`): a landing page and a live demo (`/demo`) that runs the gate on **real invoice text**, not canned payloads. The demo loads `.txt` invoice fixtures — or your own pasted invoice text, dropped `.txt`, or dropped digital `.pdf` (text layer extracted in the browser with pdf.js, layout reconstructed deterministically; scans need OCR upstream) — and parses them client-side into the same `POST /verify` body any production caller sends — that parsing stands in for the upstream agent/OCR layer; the gate stays the only validator of the body — then lets you simulate agent mistakes (a decimal slip, a wrong action, unrelated source text), apply the gate's machine-readable fix, and resubmit to watch a BLOCK become an ALLOW. Fetch mode is demoed against the live system-of-record record. An advanced view exposes the exact request body, editable and sent **verbatim**, so pasting garbage still demonstrates the fail-closed contract live. Rendering is wire-true: the decision renders exactly as returned, score `null` renders as "not computed" (never 0), money stays the exact string the gate returned (no float math), and a network failure renders an error — never a synthesized decision. Covered by a Playwright end-to-end suite that boots the real backend and crosses real CORS, in CI on every push. A plain-language walkthrough of the demo scenarios lives in [`docs/real-world-problem.md`](docs/real-world-problem.md).
+- **Web dashboard + live demo** — a Next.js site (`frontend/`): a landing page and a live demo (`/demo`) that runs the gate on **real invoice text**, not hand-edited JSON. The demo loads `.txt` invoice fixtures — or your own pasted invoice text, dropped `.txt`, or dropped digital `.pdf` (text layer extracted in the browser with pdf.js, layout reconstructed deterministically; scans need OCR upstream) — parses them client-side, **always attaches the original text as `raw_text`**, and sends the same `POST /verify` body a production integration must use. Fetch mode is demoed against the live system-of-record record (the agent sends only an invoice identifier). Then simulate agent mistakes (decimal slip, wrong action, unrelated source text), apply the gate's machine-readable fix, and resubmit to watch a BLOCK become an ALLOW. Rendering is wire-true: the decision renders exactly as returned, score `null` renders as "not computed" (never 0), money stays the exact string the gate returned (no float math), and a network failure renders an error — never a synthesized decision. Covered by a Playwright end-to-end suite that boots the real backend and crosses real CORS, in CI on every push. A plain-language walkthrough of the demo scenarios lives in [`docs/real-world-problem.md`](docs/real-world-problem.md).
 - **MCP server + pip package** — `pip install .` installs `agentgate` with the default policy shipped inside the wheel, and `agentgate-mcp` serves a `verify_action` tool over stdio for MCP-speaking agents. The tool runs the same validation and decision path as the HTTP API and always returns a Decision — never a tool error the calling agent might route around. Money over MCP must be JSON strings: the transport parses JSON before AgentGate sees it, so a numeric amount is already a lossy float and is rejected into a fail-closed escalate. A CI job installs the package into a clean environment on every push and verifies a decision from it.
+- **Document understanding, by type** — the upstream parser (`agentgate/upstream/`, mirrored exactly in the browser demo) classifies a money document before parsing it. Payable documents (invoices/bills) parse across layouts and label variants — `Invoice #/No./Number/ID`, `Bill No.`, `Tax Invoice`, `Amount/Total/Balance Due`, `Grand Total`, `Amount Payable` — with currencies detected from symbols and ISO codes (`$ € £ ₹ ¥`, `USD/EUR/GBP/INR/…`; two conflicting currencies reject as ambiguous), unambiguous international number formats (`1.240,50`, `1240,50`, `1,24,000.00`, NBSP grouping) parsed losslessly and grounded losslessly, tax summary lines (`VAT (20%)`, `Sales Tax`, `GST` — rate optional), discount and shipping line kinds, decimal quantities, and total-only documents flowing to the gate's honest "unverifiable ⇒ escalate" path. Non-payable money documents are recognized and rejected with the reason: a **quotation** is pre-payment (though an invoice merely *referencing* its quote still parses), a **receipt** is proof of a payment already made, a **purchase order** is not a bill, a **credit note** is out of scope, a **statement** is a summary of invoices to verify individually. Anything unclassifiable fails naming exactly what was looked for — never a guess, never a crash.
+- **Execute layer (orchestrator, test rail)** — `POST /orchestrator/execute` runs the whole chain: parse → propose → verify → on ALLOW pay through a deterministic **test** payment rail (the only wired mode; real credentials never exist in this process) → audit. The duplicate store is reserved **before** the rail runs, so two concurrent executions of the same invoice can never both pay — the loser aborts before money moves, and a rail failure after reserve leaves the invoice number burned with a typed `allowed_execution_failed` status for a human. ESCALATE queues a pending human approval (`/orchestrator/approvals/{id}/decide`) with first-resolution-wins semantics and an expiry (default 72h); reject and expiry execute nothing.
 
 - **Independent source fetch (fetch mode)** — instead of supplying evidence, a caller may send `"source": {"fetch": "INV-2026-0042"}` and the gate resolves the invoice from an operator-configured system of record (`AGENTGATE_RECORDS_DIR`, a directory of JSON records keyed by the invoice number *inside* each record — filenames are never trusted, so no path is ever built from caller input). Mixing `fetch` with caller-supplied evidence is rejected, every fetch failure (unknown invoice, unconfigured or corrupt store) fails closed to a human, and fetched decisions mark every evidence entry with a `system_of_record:` prefix so provenance is visible on the wire. The trust claim upgrade is real but scoped: it holds when the records directory is writable only by the operator, and the v1 reference store is a local directory — a live ERP/ledger connector is the remaining milestone.
 
@@ -59,7 +61,8 @@ curl -s -X POST https://agentgate-api-mvob.onrender.com/verify \
                "line_items": [{"description": "Widget", "quantity": "1",
                  "unit_price": {"value": "1240.00", "currency": "USD"},
                  "amount": {"value": "1240.00", "currency": "USD"}, "kind": "charge"}],
-               "total": {"value": "1240.00", "currency": "USD"}}}}'
+               "total": {"value": "1240.00", "currency": "USD"}},
+               "raw_text": "INVOICE INV-001 Acme Corp Total Due: $1,240.00"}}'
 ```
 
 The response is a `block` with `"field_to_change": "proposed_action.amount"` and the exact expected value — a reason an agent can fix against and resubmit.
@@ -90,7 +93,12 @@ decision = decide(Invoice.model_validate(invoice_dict),
 print(decision.decision, [r.message for r in decision.reasons])
 ```
 
-Or as an MCP server for an agent runtime (install with the `mcp` extra, then register the stdio command `agentgate-mcp`; the tool is `verify_action`).
+Or as MCP servers for an agent runtime (install with the `mcp` extra):
+
+- **`agentgate-mcp`** — core gate, tool **`verify_action`** only (ALLOW / BLOCK / ESCALATE)
+- **`agentgate-upstream-mcp`** — upstream tools: **`parse_invoice`**, **`propose_payment`**, **`process_invoice`**
+
+See [`docs/mcp-setup.md`](docs/mcp-setup.md) and [`docs/orchestrator.md`](docs/orchestrator.md) (verify → pay → audit).
 
 ## Architecture
 
@@ -200,11 +208,39 @@ into links.
 
 ## Deploy
 
-The backend deploys to Render from `render.yaml` (free plan; ~1 minute cold
-start after idle, ephemeral disk). The frontend deploys to Vercel from
-`frontend/`. Order matters: bring up the backend, build the frontend with
-`NEXT_PUBLIC_AGENTGATE_API` set to the backend URL, then set that Vercel
-origin in the backend's `AGENTGATE_CORS_ORIGINS`.
+### Backend on Fly.io (recommended)
+
+From `backend/`:
+
+```bash
+fly auth login
+fly launch --no-deploy    # first time only; accept app name agentgate-api
+fly secrets set AGENTGATE_CORS_ORIGINS="https://your-frontend.vercel.app,http://127.0.0.1:3000,http://localhost:3000"
+fly deploy
+```
+
+The API will be at `https://agentgate-api.fly.dev` (or the name you chose).
+Health check: `GET /health`. Fetch mode uses the demo records baked into the
+image (`AGENTGATE_RECORDS_DIR=data/system_of_record` in `fly.toml`).
+
+### Frontend
+
+Copy `frontend/.env.example` to `frontend/.env.local` and set:
+
+```bash
+NEXT_PUBLIC_AGENTGATE_API=https://agentgate-api.fly.dev
+```
+
+Restart `npm run dev` (or set the same variable in Vercel for production).
+The backend must list your frontend origin in `AGENTGATE_CORS_ORIGINS` or the
+browser will block cross-origin calls.
+
+### Backend on Render (alternative)
+
+The backend also deploys to Render from `render.yaml` (free plan; ~1 minute
+cold start after idle, ephemeral disk). Order matters: bring up the backend,
+point the frontend at that URL, then set that frontend origin in
+`AGENTGATE_CORS_ORIGINS`.
 
 ## License
 

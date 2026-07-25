@@ -106,6 +106,11 @@ def test_fetch_combined_with_raw_text_is_rejected():
         Source.model_validate({"fetch": "INV-001", "raw_text": "Total $1,240.00"})
 
 
+def test_caller_invoice_without_raw_text_is_rejected():
+    with pytest.raises(ValidationError, match="raw_text"):
+        Source.model_validate({"invoice": invoice_payload()})
+
+
 def test_source_with_neither_mode_is_rejected():
     with pytest.raises(ValidationError, match="invoice"):
         Source.model_validate({})
@@ -197,7 +202,8 @@ def test_stored_json_numbers_stay_exact_decimals(tmp_path):
     record = {
         "invoice": invoice_payload(
             line_items=[], total={"value": 1240.00, "currency": "USD"}
-        )
+        ),
+        "raw_text": "Invoice INV-001. Total due: $1,240.00 USD.",
     }
     (tmp_path / "numeric.json").write_text(json.dumps(record), encoding="utf-8")
     fetched = DirectorySourceOfRecord(tmp_path).fetch("INV-001")
@@ -246,3 +252,29 @@ def test_evidence_prefix_marks_provenance():
         "system_of_record:invoice:INV-001",
         "system_of_record:raw_text",
     ]
+
+
+def test_invoice_marked_raw_text_mentioning_a_quote_is_accepted():
+    # A legitimate invoice routinely references its originating quotation
+    # ("as per quotation Q-123"). Only quote-marked text with NO invoice
+    # marker is rejected (PRD SS5b invoice-marker precedence).
+    source = Source.model_validate(
+        {
+            "invoice": invoice_payload(),
+            "raw_text": (
+                "INVOICE\nInvoice #: INV-001\nAs per quotation Q-123.\n"
+                "Total Due: $1,240.00"
+            ),
+        }
+    )
+    assert source.raw_text is not None
+
+
+def test_quote_marked_raw_text_without_invoice_marker_is_rejected():
+    with pytest.raises(ValidationError, match="invoices only"):
+        Source.model_validate(
+            {
+                "invoice": invoice_payload(),
+                "raw_text": "QUOTATION\nQuote #: Q-1\nTotal: $1,240.00",
+            }
+        )

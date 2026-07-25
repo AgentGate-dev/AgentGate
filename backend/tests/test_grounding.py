@@ -172,3 +172,39 @@ def test_numeric_cap_applies_to_integers_and_decimals():
         Money(value=big_int, currency="USD")
     with pytest.raises(ValueError):
         Money(value=Decimal("1" * (MAX_NUMERIC_CHARS + 5)), currency="USD")
+
+
+def test_unambiguous_european_formats_tokenize_to_exact_values():
+    # A correctly-parsed European invoice total (1240.50) must ground against its
+    # own document text — otherwise every European invoice false-escalates
+    # total_not_grounded (D59). Only unambiguous forms are widened: both
+    # separators present (last one is the decimal) or comma + exactly 1-2
+    # trailing digits.
+    assert is_grounded(Decimal("1240.50"), "Gesamtbetrag: 1.240,50 EUR")
+    assert is_grounded(Decimal("1240.50"), "Amount Due: 1240,50")
+    assert is_grounded(Decimal("1234567.89"), "Total: 1.234.567,89")
+    # The old anti-partial guarantee holds: the bare left half never grounds.
+    assert Decimal("1240") not in money_tokens("Total: 1.240,50")
+
+
+def test_indian_grouping_tokenizes_to_exact_value():
+    assert is_grounded(Decimal("124000.00"), "Total Amount: ₹1,24,000.00")
+    assert is_grounded(Decimal("124000"), "Total Amount: 1,24,000")
+    tokens = money_tokens("Total Amount: 1,24,000.00")
+    assert Decimal("1") not in tokens
+    assert Decimal("24") not in tokens
+
+
+def test_nbsp_grouping_tokenizes_to_exact_value():
+    # NBSP between digit groups is a deliberate print artifact, never two
+    # separate numbers (a regular space could be, and stays a boundary).
+    assert is_grounded(Decimal("1240.50"), "Total: 1 240,50")
+    assert not is_grounded(Decimal("1240"), "qty 1 240 units ordered")
+
+
+def test_bare_dot_thousands_stays_conservative():
+    # "1.240" alone is ambiguous (US 1.240 vs European 1240): never guessed into
+    # 1240 - the fail-closed direction is an escalate on the total gate, not a
+    # false grounding.
+    assert not is_grounded(Decimal("1240"), "Total: 1.240")
+    assert is_grounded(Decimal("1.24"), "Total: 1.240")
