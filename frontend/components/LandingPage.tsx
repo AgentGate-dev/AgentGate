@@ -1,6 +1,5 @@
 import Link from "next/link";
 import {
-  DEMO_SCENARIOS,
   FEATURES,
   GITHUB_URL,
   HOW_IT_WORKS,
@@ -110,24 +109,18 @@ export function LandingPage() {
             </ol>
 
             <div className="mt-12 rounded-2xl border border-white/10 bg-zinc-950/80 p-6 md:p-8">
-              <h3 className="text-lg font-medium text-white">See it on real invoices</h3>
+              <h3 className="text-lg font-medium text-white">Try it on your invoices</h3>
               <p className="mt-2 max-w-2xl text-sm text-zinc-400">
-                Run the same scenarios our demo agent uses — decimal slips, clean approvals, and
-                policy escalations — against the live API.
+                Upload a real invoice file or paste extracted text — no preset scenarios or
+                hand-built JSON. The gate verifies against your document or your system of record.
               </p>
-              <div className="mt-6 grid gap-3 md:grid-cols-3">
-                {DEMO_SCENARIOS.map((scenario) => (
-                  <Link
-                    key={scenario.id}
-                    href={`/demo?${scenario.query}`}
-                    data-testid={`home-scenario-${scenario.id}`}
-                    className="rounded-xl border border-white/10 p-4 transition hover:border-violet-500/40"
-                  >
-                    <p className="font-medium text-white">{scenario.title}</p>
-                    <p className="mt-1 text-xs text-violet-300">{scenario.outcome}</p>
-                  </Link>
-                ))}
-              </div>
+              <Link
+                href="/demo"
+                data-testid="home-try-demo"
+                className="mt-6 inline-flex rounded-lg bg-violet-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-violet-500"
+              >
+                Open live verification
+              </Link>
             </div>
           </div>
         </section>

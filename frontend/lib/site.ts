@@ -18,7 +18,7 @@ export const FEATURES = [
   {
     title: "Evidence-backed verification",
     description:
-      "Every proposed payment is checked against structured invoice data and optional raw source text — or fetched from your system of record.",
+      "Every proposed payment is checked against invoice source text (required in caller mode) or fetched from your system of record — never agent-forged JSON alone.",
   },
   {
     title: "Machine-readable blocks",
@@ -52,7 +52,7 @@ export const HOW_IT_WORKS = [
     step: "01",
     title: "Agent proposes an action",
     description:
-      "Your agent reads an invoice and proposes approve_payment with amount, vendor, and evidence — or asks the gate to fetch from your records.",
+      "Your agent reads an invoice at payment time and proposes approve_payment with amount, vendor, and evidence — or asks the gate to fetch from your records.",
   },
   {
     step: "02",
@@ -68,30 +68,6 @@ export const HOW_IT_WORKS = [
   },
 ] as const;
 
-export const DEMO_SCENARIOS = [
-  {
-    id: "acme-inv-001",
-    query: "invoice=acme-inv-001&mistake=decimal",
-    title: "Decimal slip",
-    outcome: "Block → agent fixes amount",
-    description: "Real Acme invoice ($1,240). Simulate the $12,400 misread.",
-  },
-  {
-    id: "acme-inv-001-clean",
-    query: "invoice=acme-inv-001",
-    title: "Clean approval",
-    outcome: "Allow · score 1.00",
-    description: "Same real invoice with a correct payment proposal.",
-  },
-  {
-    id: "northwind-inv-12500",
-    query: "invoice=northwind-inv-12500",
-    title: "Policy ceiling",
-    outcome: "Escalate to human",
-    description: "Real $12,500 invoice exceeds the $10,000 policy threshold.",
-  },
-] as const;
-
 export const PLANS = [
   {
     id: "sandbox",
@@ -104,7 +80,7 @@ export const PLANS = [
     highlighted: false,
     features: [
       "Full POST /verify API",
-      "Sample invoices included",
+      "Bring your own invoices",
       "No account required",
       "Cold start on free tier (~1 min)",
     ],
