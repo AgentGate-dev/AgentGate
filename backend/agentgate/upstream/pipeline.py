@@ -1,10 +1,14 @@
-"""End-to-end upstream pipeline: parse → propose → verify (gate only)."""
+"""End-to-end upstream pipeline: parse → propose → verify (gate only).
+
+The MCP server import is deliberately LAZY (inside the functions that call the
+gate): this module is imported by the FastAPI app via the orchestrator, and the
+``mcp`` SDK is an optional extra — a module-level import took the HTTP server
+down in any environment installed without it.
+"""
 
 from __future__ import annotations
 
 from typing import Any
-
-from agentgate.mcp.server import verify_action
 
 from .invoice_text import ParsedInvoice, parse_invoice_text, parsed_invoice_to_wire
 
@@ -35,6 +39,8 @@ def process_invoice(raw_text: str) -> dict[str, Any]:
     Returns upstream artifacts plus the gate Decision. The Decision is the only
     authoritative ALLOW / BLOCK / ESCALATE outcome.
     """
+    from agentgate.mcp.server import verify_action
+
     parsed = parse_invoice_text(raw_text)
     proposed_action = default_proposed_action(parsed)
     source = {
@@ -52,6 +58,8 @@ def process_invoice(raw_text: str) -> dict[str, Any]:
 
 def process_fetch(invoice_number: str, proposed_action: dict[str, Any]) -> dict[str, Any]:
     """Fetch-mode pipeline: agent proposes against a system-of-record identifier."""
+    from agentgate.mcp.server import verify_action
+
     decision = verify_action(proposed_action, {"fetch": invoice_number.strip()})
     return {
         "fetch": invoice_number.strip(),

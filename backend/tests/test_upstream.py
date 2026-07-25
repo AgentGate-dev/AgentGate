@@ -347,3 +347,32 @@ def test_oversized_raw_text_fails_closed_over_http():
     body = resp.json()
     assert body["decision"]["decision"] == "escalate"
     assert any("raw_text" in r["message"] for r in body["decision"]["reasons"])
+
+
+def test_http_app_serves_without_the_optional_mcp_package():
+    # The FastAPI surface must never require the optional MCP SDK: CI's e2e job
+    # installs backend[server] only, and a transitive `import mcp` from the
+    # upstream pipeline took the whole server down. Block `mcp` in a clean
+    # subprocess, boot the app, and drive /agent/process end to end.
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "sys.modules['mcp'] = None\n"
+        "from pathlib import Path\n"
+        "from fastapi.testclient import TestClient\n"
+        "from agentgate.main import create_app\n"
+        "client = TestClient(create_app())\n"
+        f"text = Path({str(SAMPLES / 'acme_good.txt')!r}).read_text()\n"
+        "resp = client.post('/agent/process', json={'raw_text': text})\n"
+        "assert resp.status_code == 200, resp.status_code\n"
+        "body = resp.json()\n"
+        "assert body['decision']['decision'] == 'allow', body['decision']\n"
+        "print('ok')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
