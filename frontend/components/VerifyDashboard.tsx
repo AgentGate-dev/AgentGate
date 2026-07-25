@@ -279,33 +279,6 @@ function VerifyDashboardInner() {
     }
   }
 
-  async function runAgentPipeline() {
-    if (!rawText?.trim()) return;
-    setLoading(true);
-    setError(null);
-    setDecision(null);
-    try {
-      const resp = await fetch(`${API_BASE}/agent/process`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ raw_text: rawText }),
-      });
-      if (!resp.ok) {
-        setError(`The API returned HTTP ${resp.status}. No verification decision was produced.`);
-        return;
-      }
-      const payload = (await resp.json()) as { decision: Decision };
-      setDecision(payload.decision);
-    } catch (err) {
-      setError(
-        `Could not reach the agent pipeline (${String(err)}). ` +
-          "Ensure the backend is running with POST /agent/process enabled.",
-      );
-    } finally {
-      setLoading(false);
-    }
-  }
-
   async function verify(body?: string) {
     if (!usesManualPath && rawText && parsed && !fetchId) {
       await runOrchestratorExecute();
