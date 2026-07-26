@@ -223,3 +223,38 @@ test("/verify redirects to the live demo", async ({ page }) => {
   await page.goto("/verify");
   await expect(page).toHaveURL(/\/demo$/);
 });
+
+// --- /arena: the published-results page (D56, dumb-pipe rules) -------------------
+// Route interception stands in for the gh-pages JSON — e2e stays deterministic
+// and offline; the page itself must render exactly what the JSON says and show
+// an error panel (never synthesized counters) when the fetch fails.
+
+const ARENA_RESULTS = {
+  run_at: "2026-07-26T06:00:00+00:00",
+  total: 25,
+  counts: { allow: 3, block: 3, escalate: 19, transport_error: 0 },
+  false_allows: [],
+  expectation_mismatches: [],
+  zero_false_allows_since: "2026-07-01T06:00:00+00:00",
+  cases: [],
+};
+
+test("/arena renders the published results", async ({ page }) => {
+  await page.route("**/arena/results.json", (route) =>
+    route.fulfill({ json: ARENA_RESULTS }),
+  );
+  await page.goto("/arena");
+  await expect(page.getByTestId("arena-status")).toContainText("false allows: 0");
+  await expect(page.getByTestId("arena-status")).toContainText("since 2026-07-01");
+  await expect(page.getByTestId("arena-total")).toHaveText("25");
+  await expect(page.getByTestId("arena-blocked")).toHaveText("3");
+  await expect(page.getByTestId("arena-escalated")).toHaveText("19");
+  await expect(page.getByTestId("arena-allowed")).toHaveText("3");
+});
+
+test("/arena shows an error panel when results cannot load — never fake counters", async ({ page }) => {
+  await page.route("**/arena/results.json", (route) => route.abort());
+  await page.goto("/arena");
+  await expect(page.getByTestId("arena-error")).toBeVisible();
+  await expect(page.getByTestId("arena-total")).toHaveCount(0);
+});

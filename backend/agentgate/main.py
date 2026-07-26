@@ -23,6 +23,7 @@ from agentgate.api.orchestrator import router as orchestrator_router
 from agentgate.api.verify import router
 from agentgate.core.duplicate_store import DuplicateStore
 from agentgate.core.policy import DEFAULT_POLICY, Policy
+from agentgate.core.rate_limit import build_rate_limiter
 from agentgate.core.system_of_record import SourceOfRecord, build_source_of_record
 from agentgate.core.tracing import Tracer, build_tracer
 from agentgate.orchestrator.store import OrchestratorStore
@@ -99,6 +100,7 @@ def create_app(
     app.state.source_of_record = (
         source_of_record if source_of_record is not None else build_source_of_record()
     )
+    app.state.rate_limiter = build_rate_limiter()
     app.state.orchestrator_store = (
         orchestrator_store
         if orchestrator_store is not None

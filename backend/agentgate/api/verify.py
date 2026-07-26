@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from agentgate.core.decision import decide, fail_closed_decision
+from agentgate.core.rate_limit import client_key
 from agentgate.core.schemas import VerifyRequest
 from agentgate.core.system_of_record import (
     SourceOfRecordError,
@@ -78,6 +79,18 @@ def _unvalidated(body_bytes: int) -> dict:
 
 @router.post("/verify")
 async def verify(request: Request) -> JSONResponse:
+    # Per-IP rate limit (Slice 13, D56): exposure hygiene for an invited-attack
+    # surface, not auth. A 429 is transport-level like 404/405 (D35) — no
+    # Decision body is owed to a request the limiter refused.
+    limiter = getattr(request.app.state, "rate_limiter", None)
+    if limiter is not None and not limiter.allow(
+        client_key(dict(request.headers), request.client.host if request.client else "unknown")
+    ):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "rate limit exceeded; retry shortly."},
+        )
+
     started = time.perf_counter()
     body_bytes = 0
     try:

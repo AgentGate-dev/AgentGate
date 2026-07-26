@@ -1,0 +1,49 @@
+# Public adversarial arena (PRD Slice 13, D56): every 6 hours the in-repo
+# attack suite runs against the LIVE gate; the job goes RED if any payload
+# produces a false allow. gh-pages carries ONLY the generated results JSON —
+# published on red runs too, because hiding a red run would make the badge lie.
+name: arena
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency: arena
+
+jobs:
+  arena:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch previous results (streak carry-forward)
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/arena/results.json" \
+            -o previous.json || true
+      - name: Run the public attack suite against the live gate
+        run: |
+          python backend/arena/runner.py \
+            --base-url https://agentgate-api-mvob.onrender.com \
+            --wait-health 300 \
+            --previous previous.json \
+            --output results.json
+      - name: Publish results to gh-pages
+        if: ${{ always() && hashFiles('results.json') != '' }}
+        run: |
+          mkdir -p publish/arena
+          cp results.json publish/arena/results.json
+          cd publish
+          git init -b gh-pages
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add arena/results.json
+          git commit -m "arena: publish run results"
+          git push --force \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" \
+            gh-pages

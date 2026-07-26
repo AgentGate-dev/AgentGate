@@ -662,3 +662,77 @@ def test_invoice_referencing_a_quotation_still_verifies(client):
         ),
     )
     assert resp.json()["decision"] == "allow"
+
+
+# --- per-IP rate limit on POST /verify (Slice 13, D56) ----------------------------
+#
+# Exposure hygiene for an invited-attack surface, not auth (D40 classification):
+# a generous ceiling, HTTP 429 above it (transport-level, like 404/405 — no
+# Decision body was owed to a request the limiter refused), and NEVER a 429
+# below the ceiling — over-limiting is the fail-closed direction, but a limiter
+# that trips early would silently break legitimate callers.
+
+
+def make_limited_client(ceiling: int):
+    from agentgate.core.rate_limit import RateLimiter
+
+    app = create_app(store=DuplicateStore(), tracer=NoopTracer())
+    app.state.rate_limiter = RateLimiter(max_per_minute=ceiling)
+    return TestClient(app)
+
+
+def test_requests_below_the_ceiling_are_never_limited():
+    client = make_limited_client(5)
+    for _ in range(5):
+        assert client.post("/verify", json=verify_body()).status_code == 200
+
+
+def test_requests_above_the_ceiling_get_429():
+    client = make_limited_client(3)
+    for _ in range(3):
+        assert client.post("/verify", json=verify_body()).status_code == 200
+    resp = client.post("/verify", json=verify_body())
+    assert resp.status_code == 429
+    assert "rate limit" in resp.json()["detail"].lower()
+
+
+def test_distinct_ips_have_independent_budgets():
+    client = make_limited_client(2)
+    for _ in range(2):
+        assert (
+            client.post(
+                "/verify", json=verify_body(), headers={"X-Forwarded-For": "10.0.0.1"}
+            ).status_code
+            == 200
+        )
+    assert (
+        client.post(
+            "/verify", json=verify_body(), headers={"X-Forwarded-For": "10.0.0.1"}
+        ).status_code
+        == 429
+    )
+    # A different caller is unaffected by the first caller's exhaustion.
+    assert (
+        client.post(
+            "/verify", json=verify_body(), headers={"X-Forwarded-For": "10.0.0.2"}
+        ).status_code
+        == 200
+    )
+
+
+def test_window_expiry_restores_the_budget():
+    from agentgate.core.rate_limit import RateLimiter
+
+    moment = [0.0]
+    limiter = RateLimiter(max_per_minute=1, clock=lambda: moment[0])
+    assert limiter.allow("ip-1") is True
+    assert limiter.allow("ip-1") is False
+    moment[0] = 61.0
+    assert limiter.allow("ip-1") is True
+
+
+def test_health_endpoint_is_not_rate_limited():
+    client = make_limited_client(1)
+    assert client.post("/verify", json=verify_body()).status_code == 200
+    for _ in range(3):
+        assert client.get("/health").status_code == 200
