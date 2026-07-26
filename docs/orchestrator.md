@@ -31,6 +31,7 @@ Money-safety semantics:
 | Endpoint | Purpose |
 |----------|---------|
 | `POST /orchestrator/execute` | Full flow: `{ "raw_text": "..." }` |
+| `POST /orchestrator/pay` | Agent submits `{ "proposed_action", "source" }` — gate re-verifies, then pays on ALLOW |
 | `POST /orchestrator/approvals/{id}/decide` | `{ "approve": true \| false }` |
 | `GET /orchestrator/audit` | Recent audit events |
 
@@ -48,6 +49,28 @@ On http://127.0.0.1:3000/demo click **Verify & execute (test payment)**.
 
 - **Acme invoice** → ALLOW → `execution.status: paid` + `pay_test_...` id
 - **Northwind $12.5k** → ESCALATE → **Human approve & pay** or **Reject**
+
+### Real separate agent (recommended for live demos)
+
+AgentGate is the **gate**; the **agent is a separate process** that calls it over HTTP:
+
+```bash
+# Terminal 1 — AgentGate (gate + payment rail)
+cd backend && source .venv/bin/activate
+set -a && source .env && set +a
+uvicorn agentgate.main:app --host 127.0.0.1 --port 8000
+
+# Terminal 2 — invoice payment agent (LLM proposes; gate verifies; pays on ALLOW)
+cd backend && source .venv/bin/activate
+set -a && source .env && set +a
+AGENTGATE_URL=http://127.0.0.1:8000 python -m agentgate.agent.invoice_payment_agent
+
+# Northwind ($12.5k, escalates — type "approve" when prompted):
+AGENTGATE_URL=http://127.0.0.1:8000 python -m agentgate.agent.invoice_payment_agent \
+  ../frontend/public/invoices/northwind-inv-12500.txt
+```
+
+Flow: agent reads invoice → LLM proposes → `POST /verify` → on ALLOW → `POST /orchestrator/pay` → on ESCALATE → human approval.
 
 ## Production path
 

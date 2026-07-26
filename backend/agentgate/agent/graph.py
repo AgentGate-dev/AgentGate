@@ -73,12 +73,19 @@ def initial_state(invoice: Invoice) -> AgentState:
     return {"invoice": invoice.model_dump(mode="json")}
 
 
-def _propose_action(invoice: Invoice, *, llm_call: Callable[[str], str]) -> ProposedAction:
+def propose_payment_action(
+    invoice: Invoice, *, llm_call: Callable[[str], str] = call_llm
+) -> ProposedAction:
     """Ask the LLM to propose a payment action for ``invoice``. Raises
     ``LLMRouterError``/``ExtractionError``/``ValidationError`` on failure — the
     caller fails closed (D11)."""
     raw = llm_call(_PROPOSE_PROMPT.format(invoice_json=invoice.model_dump_json()))
     return ProposedAction.model_validate(parse_llm_json(raw))
+
+
+def _propose_action(invoice: Invoice, *, llm_call: Callable[[str], str]) -> ProposedAction:
+    """Internal alias kept for the graph node."""
+    return propose_payment_action(invoice, llm_call=llm_call)
 
 
 def _make_reproposer(llm_call: Callable[[str], str]):

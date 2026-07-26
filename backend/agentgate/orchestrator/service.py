@@ -14,7 +14,9 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
+from agentgate.core.decision import fail_closed_decision
 from agentgate.core.duplicate_store import DuplicateStore, AlreadyApprovedError
+from agentgate.core.schemas import Invoice
 from agentgate.core.policy import Policy
 from agentgate.core.system_of_record import SourceOfRecord
 from agentgate.orchestrator.gate import run_gate_decision
@@ -60,15 +62,99 @@ class Orchestrator:
             hours=approval_ttl_hours if approval_ttl_hours is not None else _approval_ttl_from_env()
         )
 
-    def execute_invoice(self, raw_text: str) -> dict[str, Any]:
-        """Parse invoice text, verify, and pay on ALLOW (test rail by default)."""
+    def execute_invoice(
+        self,
+        raw_text: str,
+        *,
+        use_llm_agent: bool = False,
+        llm_call: Optional[Callable[[str], str]] = None,
+    ) -> dict[str, Any]:
+        """Parse invoice text, verify, and pay on ALLOW (test rail by default).
+
+        When ``use_llm_agent`` is true, a live model proposes the payment action
+        (the same prompt as the LangGraph demo agent); otherwise the deterministic
+        upstream default is used.
+        """
         parsed = parse_invoice_text(raw_text)
-        proposed_action = default_proposed_action(parsed)
-        source = {
-            "invoice": parsed_invoice_to_wire(parsed),
-            "raw_text": parsed.raw_text,
-        }
-        return self._execute_verified(proposed_action, source, parsed_invoice=parsed_invoice_to_wire(parsed))
+        wire = parsed_invoice_to_wire(parsed)
+        source = {"invoice": wire, "raw_text": parsed.raw_text}
+
+        if use_llm_agent:
+            proposed_action, agent_error = self._propose_with_llm(wire, llm_call=llm_call)
+            if agent_error is not None:
+                decision = fail_closed_decision([agent_error]).model_dump(mode="json")
+                audit_id = self._orchestrator_store.record_audit(
+                    {
+                        "invoice_number": wire.get("invoice_number"),
+                        "gate_decision": "escalate",
+                        "execution_status": "not_executed",
+                        "error": agent_error,
+                        "decision": decision,
+                    }
+                )
+                return {
+                    "parsed_invoice": wire,
+                    "proposed_action": proposed_action,
+                    "source_mode": "caller",
+                    "decision": decision,
+                    "execution": {"status": "not_executed"},
+                    "audit_id": audit_id,
+                    "agent_error": agent_error,
+                }
+        else:
+            proposed_action = default_proposed_action(parsed)
+
+        return self._execute_verified(proposed_action, source, parsed_invoice=wire)
+
+    def execute_proposal(
+        self,
+        proposed_action: dict[str, Any],
+        source: dict[str, Any],
+        *,
+        parsed_invoice: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Verify an agent-supplied proposal and pay on ALLOW (test rail).
+
+        The gate always re-runs — the agent cannot skip verification by calling
+        this endpoint directly.
+        """
+        if parsed_invoice is None and "invoice" in source:
+            parsed_invoice = source["invoice"]
+        return self._execute_verified(
+            proposed_action,
+            source,
+            parsed_invoice=parsed_invoice,
+        )
+
+    def _propose_with_llm(
+        self,
+        invoice_wire: dict[str, Any],
+        *,
+        llm_call: Optional[Callable[[str], str]] = None,
+    ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+        """Return (proposed_action, error). On failure the action may be partial/null."""
+        try:
+            from agentgate.agent.graph import propose_payment_action
+            from agentgate.core.llm_router import call_llm as default_llm_call
+        except ImportError as exc:
+            return None, f"LLM agent requires the agent and llm extras: {exc}"
+
+        caller = llm_call or default_llm_call
+        try:
+            action = propose_payment_action(
+                Invoice.model_validate(invoice_wire),
+                llm_call=caller,
+            )
+        except Exception as exc:  # noqa: BLE001 — router/parse/validation all fail closed
+            return None, f"agent could not form a valid proposal: {exc}"
+
+        payload = action.model_dump(mode="json")
+        payload.setdefault(
+            "agent_rationale",
+            "Live model proposes payment matching invoice total and vendor.",
+        )
+        payload.setdefault("adjustments", [])
+        return payload, None
 
     def approve_and_execute(self, approval_id: str, *, approved: bool) -> dict[str, Any]:
         """Human decision on a pending ESCALATE — pay only if approved, only

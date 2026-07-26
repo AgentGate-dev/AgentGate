@@ -25,12 +25,22 @@ class ExecuteInvoiceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     raw_text: str = Field(min_length=1, max_length=MAX_RAW_TEXT)
+    use_llm_agent: bool = False
 
 
 class ApprovalRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     approve: bool
+
+
+class PayProposalRequest(BaseModel):
+    """Agent-submitted proposal — the gate re-verifies before any payment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    proposed_action: dict
+    source: dict
 
 
 def _orchestrator_store(request: Request) -> OrchestratorStore:
@@ -54,7 +64,10 @@ def _orchestrator(request: Request) -> Orchestrator:
 async def execute_invoice(body: ExecuteInvoiceRequest, request: Request) -> JSONResponse:
     """Parse → verify → pay on ALLOW (test rail). ESCALATE queues human approval."""
     try:
-        payload = _orchestrator(request).execute_invoice(body.raw_text)
+        payload = _orchestrator(request).execute_invoice(
+            body.raw_text,
+            use_llm_agent=body.use_llm_agent,
+        )
     except ValueError as exc:
         decision = fail_closed_decision([str(exc)]).model_dump(mode="json")
         payload = {
@@ -71,6 +84,40 @@ async def execute_invoice(body: ExecuteInvoiceRequest, request: Request) -> JSON
             "parsed_invoice": None,
             "proposed_action": None,
             "source_mode": None,
+            "decision": decision,
+            "execution": {"status": "not_executed"},
+        }
+    return JSONResponse(content=payload)
+
+
+@router.post("/pay")
+async def pay_proposal(body: PayProposalRequest, request: Request) -> JSONResponse:
+    """Re-verify an agent's proposal and pay on ALLOW (test rail).
+
+    External agents call this after ``POST /verify`` returns allow, or to queue
+    human approval when the gate escalates. The gate always runs again here —
+    proposals cannot bypass verification.
+    """
+    try:
+        payload = _orchestrator(request).execute_proposal(
+            body.proposed_action,
+            body.source,
+        )
+    except ValueError as exc:
+        decision = fail_closed_decision([str(exc)]).model_dump(mode="json")
+        payload = {
+            "parsed_invoice": body.source.get("invoice"),
+            "proposed_action": body.proposed_action,
+            "source_mode": "caller" if "fetch" not in body.source else "system_of_record",
+            "decision": decision,
+            "execution": {"status": "not_executed"},
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("unexpected error in /orchestrator/pay")
+        decision = fail_closed_decision([exc]).model_dump(mode="json")
+        payload = {
+            "parsed_invoice": body.source.get("invoice"),
+            "proposed_action": body.proposed_action,
             "decision": decision,
             "execution": {"status": "not_executed"},
         }

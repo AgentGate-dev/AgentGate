@@ -238,7 +238,26 @@ function VerifyDashboardInner() {
         decision: Decision;
         execution?: Record<string, unknown>;
         audit_id?: string;
+        proposed_action?: {
+          action_type?: string;
+          invoice_number?: string;
+          amount?: { value?: string; currency?: string };
+          vendor?: string;
+          agent_rationale?: string;
+        };
       };
+      if (payload.proposed_action?.amount?.value) {
+        // Reflect what the (possibly LLM-proposed) executed action actually was;
+        // invoice number and currency stay carried by the parsed invoice.
+        const pa = payload.proposed_action;
+        setProposal({
+          action_type: pa.action_type === "reject" ? "reject" : "approve_payment",
+          amount_value: pa.amount?.value ?? "",
+          vendor: pa.vendor ?? parsed?.vendor ?? "",
+          agent_rationale:
+            pa.agent_rationale ?? "Live model proposes payment from parsed invoice.",
+        });
+      }
       setDecision(payload.decision);
       setExecution(payload.execution ?? null);
       setAuditId(payload.audit_id ?? null);
@@ -601,12 +620,15 @@ function VerifyDashboardInner() {
             <div className="rounded-xl border border-white/10 bg-zinc-900/40 p-4">
               {!usesManualPath && parsed && (
                 <p className="text-sm text-zinc-400">
-                  The upstream agent will parse your invoice, propose{" "}
-                  <span className="font-mono text-zinc-200">
-                    approve_payment {parsed.total.value} {parsed.total.currency}
+                  The upstream agent parses your invoice and proposes payment; AgentGate
+                  verifies against the original text, then the orchestrator pays only on{" "}
+                  <span className="font-mono text-emerald-300">ALLOW</span>.
+                  For a <span className="font-mono text-zinc-300">real separate agent</span>,
+                  run{" "}
+                  <span className="font-mono text-violet-300">
+                    python -m agentgate.agent.invoice_payment_agent
                   </span>{" "}
-                  to <span className="text-zinc-200">{parsed.vendor}</span>, then call{" "}
-                  <span className="font-mono text-violet-300">verify_action</span>.
+                  against a running backend.
                 </p>
               )}
               {parsed && !usesManualPath && (
@@ -670,7 +692,9 @@ function VerifyDashboardInner() {
               className="rounded-lg bg-violet-600 px-5 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
             >
               {loading
-                ? "Running…"
+                ? usesManualPath
+                  ? "Running…"
+                  : "Agent proposing → gate verifying → paying…"
                 : usesManualPath
                   ? `Run verification (attempt ${attempt})`
                   : "Verify & execute (test payment)"}

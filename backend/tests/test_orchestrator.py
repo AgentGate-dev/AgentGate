@@ -190,6 +190,29 @@ def test_orchestrator_http_execute():
     assert body["execution"]["status"] == "paid"
 
 
+def test_orchestrator_http_pay_agent_proposal():
+    """External agents submit proposals — the gate re-verifies before paying."""
+    from agentgate.upstream.invoice_text import parse_invoice_text, parsed_invoice_to_wire
+    from agentgate.upstream.pipeline import default_proposed_action
+
+    app = create_app(cors_origins=["http://127.0.0.1:3000"])
+    client = TestClient(app)
+    text = (SAMPLES / "acme_good.txt").read_text()
+    parsed = parse_invoice_text(text)
+    wire = parsed_invoice_to_wire(parsed)
+    source = {"invoice": wire, "raw_text": parsed.raw_text}
+    proposed = default_proposed_action(parsed)
+
+    resp = client.post(
+        "/orchestrator/pay",
+        json={"proposed_action": proposed, "source": source},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["decision"]["decision"] == "allow"
+    assert body["execution"]["status"] == "paid"
+
+
 def test_duplicate_blocks_second_payment():
     orch, _ = make_orchestrator()
     text = (SAMPLES / "acme_good.txt").read_text()
@@ -198,3 +221,21 @@ def test_duplicate_blocks_second_payment():
     second = orch.execute_invoice(text)
     assert second["decision"]["decision"] == "escalate"
     assert any(r["check"] == "duplicate_check" for r in second["decision"]["reasons"])
+
+
+def test_execute_with_llm_agent_uses_injected_proposal():
+    """The LLM seam is injectable — verification runs on the model's proposal."""
+    text = (SAMPLES / "acme_good.txt").read_text()
+
+    def fake_llm(_prompt: str) -> str:
+        return (
+            '{"action_type": "approve_payment", "invoice_number": "INV-001", '
+            '"amount": {"value": "1240.00", "currency": "USD"}, "vendor": "Acme Corp"}'
+        )
+
+    orch, dup = make_orchestrator()
+    result = orch.execute_invoice(text, use_llm_agent=True, llm_call=fake_llm)
+    assert result["decision"]["decision"] == "allow"
+    assert result["execution"]["status"] == "paid"
+    assert result["proposed_action"]["amount"]["value"] == "1240.00"
+    assert dup.is_approved("INV-001")
