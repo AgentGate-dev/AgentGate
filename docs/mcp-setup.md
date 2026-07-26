@@ -10,15 +10,23 @@ Invoice PDF/email
        ↓
   agentgate-upstream-mcp     parse_invoice · propose_payment · process_invoice
        ↓
-  agentgate-mcp              verify_action  →  allow | block | escalate
-       ↓
-  Your orchestrator          pay only on allow
+  agentgate-mcp              verify_action  →  allow | block | escalate   (advisory)
+                             pay_invoice    →  verify, then execute ONLY on allow (enforced)
 ```
 
 | Server | Tools | Role |
 |--------|-------|------|
-| **`agentgate-mcp`** | `verify_action` | Core gate — ALLOW / BLOCK / ESCALATE only |
+| **`agentgate-mcp`** | `pay_invoice`, `verify_action` | Core gate — enforced execution via signed single-use decision tokens, plus the advisory tier |
 | **`agentgate-upstream-mcp`** | `parse_invoice`, `propose_payment`, `process_invoice`, `process_fetch_payment` | Upstream agent work before the gate |
+
+`pay_invoice` requires two env vars in the server's environment — without them
+it fail-closes with an instructive escalate and executes nothing, while
+`verify_action` keeps working:
+
+```bash
+AGENTGATE_SIGNING_KEY=<at least 32 chars; python -c "import secrets; print(secrets.token_urlsafe(48))">
+AGENTGATE_DB_PATH=/path/to/agentgate.db   # consumed tokens + reservations must survive restarts
+```
 
 ## Install
 

@@ -28,10 +28,21 @@ class AlreadyApprovedError(ValueError):
     slipped past the gate — fail loud, never swallow."""
 
 
+class TokenAlreadyConsumedError(ValueError):
+    """The decision token's trace_id is already consumed. A replayed token is
+    always a refusal — single-use is the point (D52)."""
+
+
 class DuplicateStore:
-    """Tracks invoice numbers that have already been approved."""
+    """Tracks approved invoice numbers AND consumed decision tokens.
+
+    Both tables live in this ONE store object — one shared connection, one lock
+    (D52 extending D33): a second connection would break the ``":memory:"``
+    default (each new ``":memory:"`` connection is a fresh empty database) and
+    invite cross-lock SQLITE_BUSY on file stores."""
 
     def __init__(self, db_path: str = ":memory:") -> None:
+        self._db_path = db_path
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         with self._lock:
@@ -41,7 +52,20 @@ class DuplicateStore:
                 "  approved_at TEXT"
                 ")"
             )
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS consumed_tokens ("
+                "  trace_id TEXT PRIMARY KEY,"
+                "  consumed_at TEXT"
+                ")"
+            )
             self._conn.commit()
+
+    @property
+    def is_file_backed(self) -> bool:
+        """True when this store survives a process restart. Execution requires
+        it: consumed tokens and reservations are the double-pay defense, and in
+        ``":memory:"`` they die with the process (D52 durability rule)."""
+        return self._db_path != ":memory:"
 
     def is_approved(self, invoice_number: str) -> bool:
         with self._lock:
@@ -75,6 +99,26 @@ class DuplicateStore:
                 # a shared file store an un-rolled-back failure wedges every other
                 # writer with "database is locked". Re-raise after clearing it.
                 self._conn.rollback()
+                raise
+            self._conn.commit()
+
+    def consume_token(self, trace_id: str, consumed_at: str = "") -> None:
+        """Record a decision token as consumed. Raises
+        ``TokenAlreadyConsumedError`` on a replay — never swallowed."""
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "INSERT INTO consumed_tokens (trace_id, consumed_at) VALUES (?, ?)",
+                    (trace_id, consumed_at),
+                )
+            except sqlite3.IntegrityError as exc:
+                self._conn.rollback()
+                raise TokenAlreadyConsumedError(
+                    f"Decision token {trace_id!r} is already consumed; refusing "
+                    "the replay (tokens are single-use)."
+                ) from exc
+            except sqlite3.Error:
+                self._conn.rollback()  # never leave a RESERVED lock wedged open
                 raise
             self._conn.commit()
 

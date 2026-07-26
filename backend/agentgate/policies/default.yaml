@@ -27,3 +27,5 @@ retry:
   # in retry.py (fail-closed — the loop cannot fix it, so it neither retries
   # forever nor approves). A key whose only other value was already ruled wrong
   # would be inert config, worse than none (D28).
+execution:
+  token_ttl_seconds: 300   # decision-token lifetime: a decide->execute bridge, not a bearer asset (D52)

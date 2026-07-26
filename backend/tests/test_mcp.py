@@ -178,3 +178,206 @@ def test_fetch_mode_not_found_fails_closed_over_mcp(monkeypatch, tmp_path):
     (reason,) = decision["reasons"]
     assert reason["check"] == "fail_closed"
     assert "not found" in reason["message"]
+
+
+# --- pay_invoice: the enforced execution interceptor (Slice 10, D49-D53) ----------
+#
+# The sandbox executor must be provably unreachable except through the gate:
+# tokens are minted only on ALLOW, consumed once, and the reserve-before-execute
+# ordering closes the concurrent-double-pay window single-use tokens cannot.
+
+import pytest
+
+from agentgate.core.duplicate_store import (
+    DuplicateStore,
+    TokenAlreadyConsumedError,
+)
+from agentgate.core.execution import ExecutionRequest, ExecutionResult
+from agentgate.mcp import server as mcp_server
+
+KEY = "s" * 32
+
+
+class SpyExecutor:
+    def __init__(self, fail: bool = False) -> None:
+        self.requests: list[ExecutionRequest] = []
+        self._fail = fail
+
+    def execute(self, request: ExecutionRequest) -> ExecutionResult:
+        self.requests.append(request)
+        if self._fail:
+            raise RuntimeError("rail down mid-execute")
+        return ExecutionResult(
+            executed=True, executor="sandbox", reference=f"sandbox-{request.trace_id}"
+        )
+
+
+@pytest.fixture()
+def enforced(monkeypatch, tmp_path):
+    """A pay_invoice environment satisfying both preconditions: a real signing
+    key and a file-backed store. Yields (store, executor spy)."""
+    monkeypatch.setenv("AGENTGATE_SIGNING_KEY", KEY)
+    store = DuplicateStore(str(tmp_path / "gate.db"))
+    spy = SpyExecutor()
+    monkeypatch.setattr(mcp_server, "_store", store)
+    monkeypatch.setattr(mcp_server, "_executors", {"approve_payment": spy})
+    yield store, spy
+    store.close()
+
+
+def pay(action=None, source=None):
+    return mcp_server.pay_invoice(
+        action if action is not None else action_payload(),
+        source if source is not None else source_payload(),
+    )
+
+
+def test_clean_action_executes_exactly_once(enforced):
+    store, spy = enforced
+    outcome = pay()
+    decision = outcome["decision"]
+    assert decision["decision"] == "allow"
+    execution = outcome["execution"]
+    assert execution["status"] == "executed"
+    assert execution["executor"] == "sandbox"
+    assert execution["reference"] == f"sandbox-{decision['trace_id']}"
+    assert [r.trace_id for r in spy.requests] == [decision["trace_id"]]
+    # Execution is the recording moment (D50): the invoice number is reserved...
+    assert store.is_approved("INV-001")
+    # ...and the token was consumed during execution — replaying its trace_id
+    # is a typed refusal (single-use, D52).
+    with pytest.raises(TokenAlreadyConsumedError):
+        store.consume_token(decision["trace_id"])
+
+
+def test_duplicate_check_is_live_over_the_wire(enforced):
+    store, spy = enforced
+    assert pay()["execution"]["status"] == "executed"
+    second = pay()
+    assert second["decision"]["decision"] == "escalate"
+    assert any(
+        r["check"] == "duplicate_check" for r in second["decision"]["reasons"]
+    )
+    assert second["execution"] is None
+    assert len(spy.requests) == 1
+
+
+def test_tampered_action_blocks_and_nothing_executes(enforced):
+    store, spy = enforced
+    outcome = pay(action_payload(amount={"value": "12400.00", "currency": "USD"}))
+    assert outcome["decision"]["decision"] == "block"
+    assert outcome["execution"] is None
+    assert spy.requests == []
+    assert not store.is_approved("INV-001")
+
+
+def test_escalate_returns_decision_and_executes_nothing(enforced):
+    _, spy = enforced
+    big = invoice_payload(
+        line_items=[
+            {
+                "description": "w",
+                "quantity": "1",
+                "unit_price": {"value": "20000.00", "currency": "USD"},
+                "amount": {"value": "20000.00", "currency": "USD"},
+                "kind": "charge",
+            }
+        ],
+        total={"value": "20000.00", "currency": "USD"},
+    )
+    action = action_payload(amount={"value": "20000.00", "currency": "USD"})
+    outcome = pay(action, {"invoice": big, "raw_text": "Invoice INV-001 Acme Corp Total Due: $20,000.00"})
+    assert outcome["decision"]["decision"] == "escalate"
+    assert outcome["execution"] is None
+    assert spy.requests == []
+
+
+def test_missing_signing_key_fails_closed_and_verify_action_is_unaffected(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("AGENTGATE_SIGNING_KEY", raising=False)
+    store = DuplicateStore(str(tmp_path / "gate.db"))
+    monkeypatch.setattr(mcp_server, "_store", store)
+    outcome = pay()
+    assert outcome["decision"]["decision"] == "escalate"
+    (reason,) = outcome["decision"]["reasons"]
+    assert "AGENTGATE_SIGNING_KEY" in reason["message"]
+    assert outcome["execution"] is None
+    # The advisory tier needs no key (D52).
+    assert verify_action(action_payload(), source_payload())["decision"] == "allow"
+    store.close()
+
+
+def test_short_signing_key_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTGATE_SIGNING_KEY", "too-short")
+    store = DuplicateStore(str(tmp_path / "gate.db"))
+    monkeypatch.setattr(mcp_server, "_store", store)
+    outcome = pay()
+    assert outcome["decision"]["decision"] == "escalate"
+    assert outcome["execution"] is None
+    store.close()
+
+
+def test_memory_store_fails_closed_naming_the_env_var(monkeypatch):
+    # Consumed tokens + reservations are the double-pay defense; with :memory:
+    # they die with the process (D52 durability rule).
+    monkeypatch.setenv("AGENTGATE_SIGNING_KEY", KEY)
+    monkeypatch.setattr(mcp_server, "_store", DuplicateStore())
+    outcome = pay()
+    assert outcome["decision"]["decision"] == "escalate"
+    (reason,) = outcome["decision"]["reasons"]
+    assert "AGENTGATE_DB_PATH" in reason["message"]
+    assert outcome["execution"] is None
+
+
+def test_executor_failure_after_reserve_keeps_the_invoice_burned(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("AGENTGATE_SIGNING_KEY", KEY)
+    store = DuplicateStore(str(tmp_path / "gate.db"))
+    failing = SpyExecutor(fail=True)
+    monkeypatch.setattr(mcp_server, "_store", store)
+    monkeypatch.setattr(mcp_server, "_executors", {"approve_payment": failing})
+    outcome = pay()
+    # The Decision is never mutated by execution outcomes (D25 extended).
+    assert outcome["decision"]["decision"] == "allow"
+    assert outcome["execution"]["status"] == "allowed_execution_failed"
+    # Unknown-outcome money movement: the number STAYS reserved for a human.
+    assert store.is_approved("INV-001")
+    assert len(failing.requests) == 1
+    store.close()
+
+
+class NeverDuplicateStore(DuplicateStore):
+    """Simulates the concurrent window: the decision-time read never sees the
+    other in-flight approval, so BOTH decisions reach ALLOW — only the
+    reserve-first ``mark_approved`` (D50) can stop the second execution."""
+
+    def is_approved(self, invoice_number: str) -> bool:  # noqa: ARG002
+        return False
+
+
+def test_concurrent_allows_execute_exactly_once(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTGATE_SIGNING_KEY", KEY)
+    store = NeverDuplicateStore(str(tmp_path / "gate.db"))
+    spy = SpyExecutor()
+    monkeypatch.setattr(mcp_server, "_store", store)
+    monkeypatch.setattr(mcp_server, "_executors", {"approve_payment": spy})
+
+    first = pay()
+    second = pay()
+    assert first["execution"]["status"] == "executed"
+    assert second["decision"]["decision"] == "allow"  # its token was valid too
+    assert second["execution"]["status"] == "payment_aborted_duplicate"
+    assert len(spy.requests) == 1  # the refusal happened BEFORE money moved
+    store.close()
+
+
+def test_pay_invoice_never_raises(monkeypatch, enforced):
+    def boom(*args, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr("agentgate.mcp.server.decide", boom)
+    outcome = pay()
+    assert outcome["decision"]["decision"] == "escalate"
+    assert outcome["execution"] is None

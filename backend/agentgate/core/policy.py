@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .verifier import critical_check_names
 
@@ -46,6 +46,15 @@ class RetryPolicy(BaseModel):
     max_attempts: int
 
 
+class ExecutionPolicy(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    # Decision-token lifetime (D52): a token is a decide->execute bridge, not a
+    # bearer asset. token_ttl_seconds is the only execution knob until the card
+    # rail lands — card_intent_ttl_hours arrives WITH its consumer (D28/D47).
+    token_ttl_seconds: int = Field(default=300, ge=1)
+
+
 class Policy(BaseModel):
     """Escalation thresholds + the asserted critical-check set + retry config."""
 
@@ -55,6 +64,7 @@ class Policy(BaseModel):
     score_below: Optional[Decimal] = None
     critical_checks: frozenset[str]
     retry: RetryPolicy
+    execution: ExecutionPolicy = ExecutionPolicy()
 
     @field_validator("amount_greater_than", "score_below", mode="before")
     @classmethod
@@ -100,11 +110,11 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> Policy:
     # typo like `amount_greater_then` would otherwise be silently dropped, leaving
     # the operator's intended escalation threshold unset — a gate quietly WEAKER
     # than its written config. An inert config key is worse than none.
-    unknown_top = set(raw) - {"escalate_if", "retry", "critical_checks", "block_if"}
+    unknown_top = set(raw) - {"escalate_if", "retry", "critical_checks", "block_if", "execution"}
     if unknown_top:
         raise PolicyError(
             f"unknown top-level policy keys: {sorted(unknown_top)}. "
-            "Allowed: escalate_if, retry, critical_checks."
+            "Allowed: escalate_if, retry, critical_checks, execution."
         )
 
     escalate_if = raw.get("escalate_if") or {}
@@ -123,6 +133,15 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> Policy:
         raise PolicyError(
             f"unknown retry keys: {sorted(unknown_retry)}. Allowed: max_attempts."
         )
+    execution = raw.get("execution") or {}
+    if not isinstance(execution, dict):
+        raise PolicyError("execution must be a mapping.")
+    unknown_execution = set(execution) - {"token_ttl_seconds"}
+    if unknown_execution:
+        raise PolicyError(
+            f"unknown execution keys: {sorted(unknown_execution)}. "
+            "Allowed: token_ttl_seconds."
+        )
 
     try:
         policy = Policy(
@@ -130,6 +149,7 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> Policy:
             score_below=escalate_if.get("score_below"),
             critical_checks=frozenset(raw.get("critical_checks") or ()),
             retry=RetryPolicy(max_attempts=retry.get("max_attempts")),
+            execution=ExecutionPolicy(**execution),
         )
     except (ValidationError, ValueError) as exc:
         raise PolicyError(f"invalid policy: {exc}") from exc
