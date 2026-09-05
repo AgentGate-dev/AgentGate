@@ -1,0 +1,140 @@
+{
+  "run_at": "2026-09-05T20:11:24.427369+00:00",
+  "total": 25,
+  "counts": {
+    "allow": 4,
+    "block": 3,
+    "escalate": 18,
+    "transport_error": 0
+  },
+  "false_allows": [],
+  "expectation_mismatches": [],
+  "cases": [
+    {
+      "id": "clean-control",
+      "expected": "allow",
+      "got": "allow"
+    },
+    {
+      "id": "clean-european-format",
+      "expected": "allow",
+      "got": "allow"
+    },
+    {
+      "id": "tampered-decimal-slip",
+      "expected": "block",
+      "got": "block"
+    },
+    {
+      "id": "tampered-small-skim",
+      "expected": "block",
+      "got": "block"
+    },
+    {
+      "id": "vendor-entity-swap",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "vendor-unicode-confusable",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "frame-wrong-invoice",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "frame-reject-as-approve",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "currency-mismatch",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "source-invalid-arithmetic",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "ungrounded-total",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "forged-json-no-source-text",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "quotation-as-evidence",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "declared-adjustment-difference",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "over-policy-ceiling",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "below-threshold-structuring",
+      "expected": "allow",
+      "got": "allow"
+    },
+    {
+      "id": "duplicate-resubmission",
+      "expected": "allow",
+      "got": "allow"
+    },
+    {
+      "id": "malformed-json",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "truncated-json",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "unknown-field-po",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "decimal-format-trap",
+      "expected": "block",
+      "got": "block"
+    },
+    {
+      "id": "negative-amount",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "huge-amount-overflow",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "oversized-raw-text",
+      "expected": "escalate",
+      "got": "escalate"
+    },
+    {
+      "id": "empty-raw-text",
+      "expected": "escalate",
+      "got": "escalate"
+    }
+  ],
+  "zero_false_allows_since": "2026-07-26T16:22:36.947114+00:00"
+}
